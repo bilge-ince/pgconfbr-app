@@ -30,6 +30,7 @@ def initialize_database(conn):
 
 def _create_tables(cur, text_vector_size=384):
     """Create required tables."""
+    # Main embeddings table
     query = """
         CREATE TABLE IF NOT EXISTS products_embeddings_pgvector(
             id INTEGER PRIMARY KEY REFERENCES products_pgconf(img_id) ON DELETE CASCADE,
@@ -37,15 +38,34 @@ def _create_tables(cur, text_vector_size=384):
             image_embedding vector(512));
     """
     cur.execute(query, (text_vector_size,))
+    
+    # Separate table for iterative scan demonstrations
+    iterative_scan_query = """
+        CREATE TABLE IF NOT EXISTS products_embeddings_iterative_scan(
+            id INTEGER PRIMARY KEY REFERENCES products_pgconf(img_id) ON DELETE CASCADE,
+            embeddings vector(%s),
+            image_embedding vector(512));
+    """
+    cur.execute(iterative_scan_query, (text_vector_size,))
 
 
 def create_pgvector_indexes(conn):
     cur = conn.cursor()
-    # L2
+    # L2 index for main table
     cur.execute(
-        """CREATE INDEX ON products_embeddings_pgvector USING hnsw (embeddings vector_l2_ops)
-WITH (m = 16, ef_construction = 100);"""
+        """CREATE INDEX IF NOT EXISTS idx_products_embeddings_pgvector_hnsw 
+        ON products_embeddings_pgvector USING hnsw (embeddings vector_l2_ops)
+        WITH (m = 16, ef_construction = 100);"""
     )
+    
+    # L2 index for iterative scan table with relaxed_order setting
+    cur.execute(
+        """CREATE INDEX IF NOT EXISTS idx_products_embeddings_iterative_scan_hnsw 
+        ON products_embeddings_iterative_scan USING hnsw (embeddings vector_l2_ops)
+        WITH (m = 16, ef_construction = 100);"""
+    )
+    
+    print("Created HNSW indexes for both embedding tables")
 
 
 def generate_embeddings_single(conn):
@@ -95,17 +115,24 @@ def generate_store_embeddings(conn, base_path, batch_size=1000):
         cursor = conn.cursor()
 
         fetch_start = time.time()
-        # Fetch all data first (consider server-side cursors for very large datasets)
-        cursor.execute("SELECT img_id, productdisplayname FROM products_pgconf;")
+        # Fetch only products that don't have embeddings yet
+        cursor.execute("""
+            SELECT p.img_id, p.productdisplayname 
+            FROM products_pgconf p 
+            LEFT JOIN products_embeddings_pgvector e ON p.img_id = e.id 
+            WHERE e.id IS NULL
+            ORDER BY p.img_id;
+        """)
         all_results = cursor.fetchall()
         fetch_end = time.time()
         print(
-            f"Fetched {len(all_results)} rows in {fetch_end - fetch_start:.2f} seconds."
+            f"Fetched {len(all_results)} rows without embeddings in {fetch_end - fetch_start:.2f} seconds."
         )
 
         data_to_insert = []
         text_model, text_tokenizer = initialize_model(
-            model_name="GritLM/GritLM-7B", trust_remote_code=True
+            model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", 
+            trust_remote_code=False
         )
         for i in range(0, len(all_results)):
             img_id, product_text = all_results[i]
@@ -141,8 +168,11 @@ def generate_store_embeddings(conn, base_path, batch_size=1000):
                 conn.commit()  # Commit after each batch insertion
 
                 total_rows_inserted += len(data_to_insert)
+                # Get current total count for progress tracking
+                cursor.execute("SELECT COUNT(*) FROM products_embeddings_pgvector;")
+                current_total = cursor.fetchone()[0]
                 print(
-                    f"Inserted batch of {len(data_to_insert)}. Total rows inserted: {total_rows_inserted}"
+                    f"Inserted batch of {len(data_to_insert)}. Current total embeddings: {current_total}/44093 ({current_total/44093*100:.1f}%)"
                 )
 
                 # Clear lists for the next batch
@@ -173,6 +203,49 @@ def generate_store_embeddings(conn, base_path, batch_size=1000):
     ):  # Check if fetch timing variables exist
         print(f"Data fetching time: {fetch_end - fetch_start:.2f} seconds")
     print("Batch embedding process complete.")
+
+
+def populate_iterative_scan_table(conn, batch_size=1000):
+    """
+    Populate the iterative scan table with embeddings from the main table
+    """
+    function_start_time = time.time()
+    total_rows_inserted = 0
+    
+    try:
+        cursor = conn.cursor()
+        
+        # Copy embeddings from main table to iterative scan table
+        print("Copying embeddings from main table to iterative scan table...")
+        cursor.execute("""
+            INSERT INTO products_embeddings_iterative_scan (id, embeddings, image_embedding)
+            SELECT id, embeddings, image_embedding 
+            FROM products_embeddings_pgvector
+            ON CONFLICT (id) DO UPDATE SET 
+                embeddings = EXCLUDED.embeddings,
+                image_embedding = EXCLUDED.image_embedding;
+        """)
+        
+        # Get count of inserted rows
+        cursor.execute("SELECT COUNT(*) FROM products_embeddings_iterative_scan;")
+        total_rows_inserted = cursor.fetchone()[0]
+        
+        conn.commit()
+        print(f"Successfully copied {total_rows_inserted} embeddings to iterative scan table")
+        
+    except psycopg2.Error as e:
+        print(f"Database error: {e}")
+        if conn:
+            conn.rollback()
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    finally:
+        if cursor:
+            cursor.close()
+    
+    function_end_time = time.time()
+    total_time = function_end_time - function_start_time
+    print(f"Iterative scan table population took {total_time:.2f} seconds")
 
 
 def load_images_batch(batch_ids, base_path, processor):
@@ -210,6 +283,9 @@ def main():
         generate_store_embeddings(
             conn, "dataset/images", 100
         )  # Create and refresh the retriever for the products table and images bucket
+        
+        # Populate the iterative scan table with embeddings
+        populate_iterative_scan_table(conn)
         vector_time = time.time() - start_time
         print(f"Total process time: {vector_time:.4f} seconds.")
     except (Exception, psycopg2.DatabaseError) as error:

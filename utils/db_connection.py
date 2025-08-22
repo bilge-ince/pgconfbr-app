@@ -1,5 +1,9 @@
 import psycopg2
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 def create_db_connection():
     """Create and return a database connection."""

@@ -17,7 +17,6 @@ def create_img_embedding_table(conn: psycopg2.extensions.connection)-> None:
     
 def create_generic_tables(conn: psycopg2.extensions.connection)-> None:
     with conn.cursor() as cur:
-        cur.execute("DROP TABLE IF EXISTS products_pgconf;")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS products_pgconf (
@@ -33,6 +32,7 @@ def create_generic_tables(conn: psycopg2.extensions.connection)-> None:
                 productDisplayName TEXT NULL
             );"""
         )
+        conn.commit()
 
 
 def populate_product_data(conn: psycopg2.extensions.connection, csv_file: str
@@ -76,7 +76,6 @@ def populate_product_data(conn: psycopg2.extensions.connection, csv_file: str
 
 if __name__ == "__main__":
     conn = create_db_connection()
-    create_generic_tables(conn)
-    populate_product_data(conn, 'dataset/updated_stylesc.csv')
-    conn.commit()
+    create_generic_tables(conn)  # This now commits
+    populate_product_data(conn, 'dataset/updated_stylesc.csv')  # This also commits internally
     conn.close()

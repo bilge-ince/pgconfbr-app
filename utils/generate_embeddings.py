@@ -14,9 +14,19 @@ def initialize_model(model_name="sentence-transformers/paraphrase-multilingual-M
     model_name: str, name of the model to use for generating embeddings
     trust_remote_code: bool, whether to trust remote code for the model
     """
+    import torch
+    
     text_tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code)
-        
     text_model = AutoModel.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    
+    # Set model to evaluation mode for faster inference
+    text_model.eval()
+    
+    # Move to GPU if available for faster inference
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    text_model = text_model.to(device)
+    
+    print(f"Model loaded on device: {device}")
     return text_model, text_tokenizer
 
 
@@ -25,17 +35,38 @@ def generate_short_text_embeddings(query, text_tokenizer=None, text_model=None):
     Generate text embeddings using Sentence Transformers model
     
     Args:
-    query: str, text to generate embeddings for pgvector
+    query: str or list of str, text to generate embeddings for pgvector
     """
     if text_tokenizer and text_model:
-        text_inputs = text_tokenizer(query, padding=True, truncation=True, return_tensors="pt")
-        text_model_output = text_model(**text_inputs)
-        text_embeddings = text_model_output.last_hidden_state.mean(dim=1).squeeze().detach().cpu().numpy().tolist()
+        import torch
+        
+        # Set max_length explicitly to avoid truncation warning
+        max_length = getattr(text_model.config, 'max_position_embeddings', 512)
+        text_inputs = text_tokenizer(
+            query, 
+            padding=True, 
+            truncation=True, 
+            max_length=max_length,
+            return_tensors="pt"
+        )
+        
+        # Move inputs to same device as model
+        device = next(text_model.parameters()).device
+        text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
+        
+        # Use torch.no_grad() for inference efficiency
+        with torch.no_grad():
+            text_model_output = text_model(**text_inputs)
+            text_embeddings = text_model_output.last_hidden_state.mean(dim=1).squeeze().detach().cpu().numpy()
+        
+        # Handle both single text and batch processing
+        if text_embeddings.ndim == 1:
+            return text_embeddings.tolist()
+        else:
+            return text_embeddings.tolist()
     else:
         print("Text model and tokenizer are not initialized.")
         return None
-
-    return text_embeddings
 
 def generate_image_embeddings(image):
     """

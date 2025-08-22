@@ -82,8 +82,10 @@ engine = create_engine(DATABASE_URL)
 
 @st.cache_resource
 def load_model():
+    # Use the same lightweight model as in setup for consistency and speed
     model, tokenizer = initialize_model(
-        model_name="GritLM/GritLM-7B", trust_remote_code=True
+        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", 
+        trust_remote_code=False
     )
     return model, tokenizer
 
@@ -169,7 +171,90 @@ def display_image_s3(image_name, staging_bucket='public-ai-images'):
     
     # s3.meta.client.upload_file(f'{file_path}', 'public-ai-team', f'{image_name}')
 
-def search_catalog(text_query, selected_gender=None, search_mode="text"):
+def to_pgvector(vec):
+    return "[" + ",".join(f"{x:.6f}" for x in vec) + "]"  # literal for pgvector
+
+def search_with_iterative_scan(search_query, selected_gender=None, ef_search=40, limit=10):
+    """
+    Search using HNSW with relaxed iterative scan for demonstration
+    Optimized with cached model loading
+    """
+    conn = st.session_state.db_conn
+    cur = conn.cursor()
+    
+    try:
+        # Use cached model for faster performance
+        with st.spinner("Preparing HNSW iterative scan..."):
+            text_model, text_tokenizer = load_model()  # This is already cached via @st.cache_resource
+        
+        # Time only the actual search operations
+        embed_start = time.time()
+        query_embedding = generate_short_text_embeddings(search_query, text_tokenizer, text_model)
+        embed_time = time.time() - embed_start
+        
+        # Set HNSW parameters for demonstration
+        hnsw_start = time.time()
+        cur.execute("SET LOCAL enable_seqscan = off;")
+        cur.execute("SET LOCAL enable_bitmapscan = off;")
+        cur.execute(f"SET LOCAL hnsw.ef_search = {ef_search};")
+        cur.execute(f"SET LOCAL hnsw.max_scan_tuples = 20000;")
+        cur.execute(f"SET LOCAL hnsw.scan_mem_multiplier = 2;")
+        cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order;")
+        
+        # Execute the search query
+        search_start = time.time()
+        if selected_gender != "None":
+            sql = """
+                SELECT e.id, e.embeddings <=> %s::vector AS distance
+                FROM products_embeddings_iterative_scan e
+                JOIN products_pgconf p ON p.img_id = e.id AND p.gender = %s
+                ORDER BY distance
+                LIMIT 11;
+                """
+            cur.execute(sql, (to_pgvector(query_embedding), selected_gender))
+        else:
+            sql = """
+            SELECT e.id, e.embeddings <=> %s::vector AS distance
+            FROM products_embeddings_iterative_scan e
+            ORDER BY distance
+            LIMIT 11;
+            """
+            cur.execute(sql, (to_pgvector(query_embedding),))
+        
+        results = cur.fetchall()
+        keys = [row[0] for row in results]
+        search_time = time.time() - search_start
+        total_time = time.time() - hnsw_start
+        
+        # Display performance breakdown for demo
+        st.write(f"**🚀 HNSW Iterative Scan Results** (relaxed_order)")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Embedding Time", f"{embed_time:.3f}s", "Query → Vector")
+        with col2:
+            st.metric("Search Time", f"{search_time:.3f}s", "HNSW Index Scan")
+        with col3:
+            st.metric("Total Time", f"{total_time:.3f}s", f"{len(keys)} results")
+        
+        st.info(f"⚙️ **Settings**: ef_search={ef_search}, iterative_scan=relaxed_order, table=products_embeddings_iterative_scan")
+        
+        if keys:
+            st.write(f"Found {len(keys)} results:")
+            for result in keys:
+                product = get_product_details_in_category(result)
+                st.write(f"**{product['name']}**")
+                image_name = str(result) + ".jpg"
+                display_image_s3(image_name)
+        else:
+            st.error("No results found.")
+            
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
+    finally:
+        cur.close()
+
+def search_catalog(text_query, selected_gender=None, search_mode="Semantic Search"):
     """
     This function aims to use  aidb.retrieve_key() to do hybrid search
     Therefore over sampling on retrieving is required to get the best results
@@ -183,15 +268,16 @@ def search_catalog(text_query, selected_gender=None, search_mode="text"):
     cur = conn.cursor()
     try:
         start_time = time.time()
-        if search_mode == "text":
-            # text_embeddings = generate_ollama_embeddings(text_query)
-            
-            # Load the model and processor
-            with st.spinner("Loading model..."):
-                text_model, text_tokenizer = load_model()
-                st.success("Model ready!")
-
-            text_embeddings = generate_short_text_embeddings(text_query,text_tokenizer, text_model)
+        search_start = time.time()
+        embed_time = 0
+        if search_mode == "Semantic Search":
+            # Use cached model for faster performance
+            with st.spinner("Loading model for semantic..."):
+                text_model, text_tokenizer = load_model()  # This is already cached via @st.cache_resource
+            # Time only the actual search operations
+            embed_start = time.time()
+            text_embeddings = generate_short_text_embeddings(text_query, text_tokenizer, text_model)
+            embed_time = time.time() - embed_start
             if selected_gender != "None":
             # Filter products through CLIP Model
             # This is a hybrid search using text and limited only with the number of images in the S3 bucket
@@ -222,16 +308,30 @@ def search_catalog(text_query, selected_gender=None, search_mode="text"):
                 cur.execute(
                     f"""SELECT id, (embeddings <=> '{text_embeddings}') AS score FROM products_embeddings_pgvector ORDER BY score LIMIT 11;"""
                 )
-        elif search_mode == "bm25":
+        elif search_mode == "BM25 Search":
+            print("Using BM25 Search")
             cur.execute(
                 f"""SELECT img_id, ts_rank(to_tsvector(productdisplayname), plainto_tsquery('{text_query}')) AS score FROM products_pgconf WHERE to_tsvector(productdisplayname) @@ plainto_tsquery('{text_query}') ORDER BY score DESC LIMIT 11;"""
             )
-        results = cur.fetchall()
-        keys = [row[0] for row in results]
-        print(results)
        # Extract only the filenames from the results
         query_time = time.time() - start_time
         st.write(f"Querying similar catalog took {query_time:.4f} seconds.")
+        results = cur.fetchall()
+        keys = [row[0] for row in results]
+        search_time = time.time() - search_start
+        
+        # Display performance breakdown for demo
+        st.write(f"**🚲 Scan Results**")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Embedding Time", f"{embed_time:.3f}s", "Query → Vector")
+        with col2:
+            st.metric("Search Time", f"{search_time:.3f}s", f"For {search_mode} type")
+
+
+        st.info(f"⚙️ **Settings**: iterative_scan=no, Search Type={search_mode}")
+
         if keys:
             st.write(f"Number of elements retrieved: {len(keys)}")
             for result in keys:
@@ -254,6 +354,12 @@ def search_catalog(text_query, selected_gender=None, search_mode="text"):
 st.session_state.s3_bucket_name = "public-ai-team"
 if "db_conn" not in st.session_state or st.session_state.db_conn.closed:
     st.session_state.db_conn = create_db_connection()
+
+# Pre-warm the model for faster iterative scan performance
+if "model_prewarmed" not in st.session_state:
+    load_model()  # This will cache the model via @st.cache_resource
+    st.session_state.model_prewarmed = True
+
 # Load the text information data about products into db.
 # load_data_to_db(st.session_state.db_conn, 'dataset/stylesc.csv')
 # Using columns to create a two-part layout
@@ -279,6 +385,9 @@ with right_column:
     search_query_bm25 = st.text_input("Enter search term for full text search:", "", key="search_query_bm25")
     search_query = st.text_input("Enter search term for semantic search:", "", key="search_query")
     selected_gender = st.selectbox("Select the gender:", ["None"] + get_genders())
+    
+    # Iterative scan checkbox
+    enable_iterative_scan = st.checkbox("Enable Iterative Scan")
 
     # File uploader for image
     uploaded_image = st.file_uploader(
@@ -289,21 +398,26 @@ with right_column:
 
     # Initialize a variable to track whether the search should be executed
     execute_search = False
-
+    
     # Button for text search
     if search_query and st.button("Search with Text"):
         execute_search = True
-        search_mode = "text"
+        search_mode = "Semantic Search"
 
-    # Button for text search
-    if search_query_bm25 and st.button("Search with Text"):
+    # Button for BM25 search
+    if search_query_bm25 and st.button("Search with BM25"):
         execute_search = True
-        search_mode = "text"
+        search_mode = "BM25 Search"
+
+    # Conditional iterative scan button for text search
+    if enable_iterative_scan and search_query and st.button("Search with Iterative Scan"):
+        execute_search = True
+        search_mode = "Iterative Scan"
 
     # Button for image search; always shown if there is an uploaded image, regardless of text search state
     if uploaded_image is not None and st.button("Search with Image"):
         execute_search = True
-        search_mode = "image"
+        search_mode = "Image Search"
 
     # Assuming 'Reset' button click handling
     if st.button("Reset"):
@@ -316,15 +430,20 @@ with right_column:
         # Optionally, guide users to refresh the page for a full reset
         st.info("Please refresh the page to completely reset the application.")
 
+        
+
     if execute_search:
-        if search_mode == "text":
+        if search_mode == "Semantic Search":
+            st.write(f"Results for '{search_query}':")
+            search_catalog(search_query, selected_gender, search_mode="Semantic Search")
+        elif search_mode == "BM25 Search":
+            st.write(f"Results for '{search_query_bm25}':")
+            search_catalog(search_query_bm25, selected_gender, search_mode="BM25 Search")
+        elif search_mode == "Iterative Scan":
             if search_query:
-                st.write(f"Results for '{search_query}':")
-                search_catalog(search_query, selected_gender, search_mode="text")
-            elif search_query_bm25:
-                st.write(f"Results for '{search_query_bm25}':")
-                search_catalog(search_query_bm25, selected_gender, search_mode="bm25")
-        elif search_mode == "image":
+                st.write(f"HNSW Iterative Scan Results for '{search_query}':")
+                search_with_iterative_scan(search_query, selected_gender)
+        elif search_mode == "Image Search":
             try:
                 # Process and display the uploaded image
                 image_name = uploaded_image.name
