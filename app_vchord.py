@@ -62,8 +62,20 @@ st.title("Recommendation Engine")
 st.markdown("## Powered by Postgres")
 
 
-# Database connection details
-DATABASE_URL = "postgresql://%s:%s@%s:%s/%s" % (quote_plus(os.getenv("DB_USER")), quote_plus(os.getenv("DB_PASSWORD")), os.getenv("DB_HOST"), os.getenv("DB_PORT"), os.getenv("DB_NAME"))
+# Build database URL with proper error handling
+db_user = os.getenv("DB_USER") or ""
+db_password = os.getenv("DB_PASSWORD") or ""
+db_host = os.getenv("DB_HOST") or "localhost"
+db_port = os.getenv("DB_PORT") or "5432"
+db_name = os.getenv("DB_NAME") or ""
+
+DATABASE_URL = "postgresql://%s:%s@%s:%s/%s" % (
+    quote_plus(db_user), 
+    quote_plus(db_password), 
+    db_host, 
+    db_port, 
+    db_name
+)
 
 engine = create_engine(DATABASE_URL)
 

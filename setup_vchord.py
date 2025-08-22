@@ -18,6 +18,8 @@ from utils.generate_embeddings import generate_text_embeddings
 def initialize_database(conn):
     """Initialize the database with required extensions and tables."""
     with conn.cursor() as cur:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pgvector;")
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vchord;")
         _create_tables(cur)
 
 

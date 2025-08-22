@@ -21,6 +21,10 @@ from utils.generate_embeddings import generate_short_text_embeddings, initialize
 def initialize_database(conn):
     """Initialize the database with required extensions and tables."""
     with conn.cursor() as cur:
+        try:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        except Exception as e:
+            print(f"Extension creation warning (may be expected): {e}")
         _create_tables(cur)
 
 
@@ -32,7 +36,7 @@ def _create_tables(cur, text_vector_size=384):
             embeddings vector(%s),
             image_embedding vector(512));
     """
-    cur.execute(query, (text_vector_size))
+    cur.execute(query, (text_vector_size,))
 
 
 def create_pgvector_indexes(conn):
@@ -92,7 +96,7 @@ def generate_store_embeddings(conn, base_path, batch_size=1000):
 
         fetch_start = time.time()
         # Fetch all data first (consider server-side cursors for very large datasets)
-        cursor.execute("SELECT img_id, productdisplayname FROM products_gritllm;")
+        cursor.execute("SELECT img_id, productdisplayname FROM products_pgconf;")
         all_results = cursor.fetchall()
         fetch_end = time.time()
         print(

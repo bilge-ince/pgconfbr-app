@@ -63,7 +63,20 @@ st.markdown("## Powered by Postgres")
 
 
 
-DATABASE_URL = "postgresql://%s:%s@%s:%s/%s" % (quote_plus(os.getenv("DB_USER")), quote_plus(os.getenv("DB_PASSWORD")), os.getenv("DB_HOST"), os.getenv("DB_PORT"), os.getenv("DB_NAME"))
+# Build database URL with proper error handling
+db_user = os.getenv("DB_USER") or ""
+db_password = os.getenv("DB_PASSWORD") or ""
+db_host = os.getenv("DB_HOST") or "localhost"
+db_port = os.getenv("DB_PORT") or "5432"
+db_name = os.getenv("DB_NAME") or ""
+
+DATABASE_URL = "postgresql://%s:%s@%s:%s/%s" % (
+    quote_plus(db_user), 
+    quote_plus(db_password), 
+    db_host, 
+    db_port, 
+    db_name
+)
 
 engine = create_engine(DATABASE_URL)
 
@@ -76,7 +89,7 @@ def load_model():
 
 @st.cache_data
 def get_categories():
-    query = text("SELECT DISTINCT masterCategory FROM products_gritllm order by 1;")
+    query = text("SELECT DISTINCT masterCategory FROM products_pgconf order by 1;")
     with engine.connect() as connection:
         result = connection.execute(query)
         # Fetch the result set as a list of dictionaries for easier access
@@ -96,7 +109,7 @@ def get_genders():
 @st.cache_data
 def get_products_by_category(category):
     query = text(
-        "SELECT productDisplayName, img_id FROM products_gritllm WHERE masterCategory = :category order by 1 limit 30;"
+        "SELECT productDisplayName, img_id FROM products_pgconf WHERE masterCategory = :category order by 1 limit 30;"
     )
     with engine.connect() as connection:
         result = connection.execute(query, {"category": category})
@@ -124,7 +137,7 @@ def get_product_details_in_category(img_id):
     """
 
     query = text(
-        "SELECT productDisplayName, img_id FROM products_gritllm WHERE img_id = :img_id;"
+        "SELECT productDisplayName, img_id FROM products_pgconf WHERE img_id = :img_id;"
     )
 
     with engine.connect() as connection:
@@ -188,7 +201,7 @@ def search_catalog(text_query, selected_gender=None, search_mode="text"):
                 f"""WITH filtered_products AS (
                 -- First get all men's products
                 SELECT img_id, productdisplayname
-                FROM products_gritllm 
+                FROM products_pgconf 
                 WHERE gender = '{selected_gender}'
                 )
                 SELECT 
@@ -198,7 +211,7 @@ def search_catalog(text_query, selected_gender=None, search_mode="text"):
                 FROM filtered_products fp
                 CROSS JOIN LATERAL (
                     SELECT id, (embeddings <=> '{text_embeddings}') AS score 
-                    FROM products_embeddings_gritllm 
+                    FROM products_embeddings_pgvector 
                     ORDER BY score
                     LIMIT 20
                 ) AS result
@@ -207,11 +220,11 @@ def search_catalog(text_query, selected_gender=None, search_mode="text"):
                 )
             else:
                 cur.execute(
-                    f"""SELECT id, (embeddings <=> '{text_embeddings}') AS score FROM products_embeddings_gritllm ORDER BY score LIMIT 11;"""
+                    f"""SELECT id, (embeddings <=> '{text_embeddings}') AS score FROM products_embeddings_pgvector ORDER BY score LIMIT 11;"""
                 )
         elif search_mode == "bm25":
             cur.execute(
-                f"""SELECT img_id, ts_rank(to_tsvector(productdisplayname), plainto_tsquery('{text_query}')) AS score FROM products_gritllm WHERE to_tsvector(productdisplayname) @@ plainto_tsquery('{text_query}') ORDER BY score DESC LIMIT 11;"""
+                f"""SELECT img_id, ts_rank(to_tsvector(productdisplayname), plainto_tsquery('{text_query}')) AS score FROM products_pgconf WHERE to_tsvector(productdisplayname) @@ plainto_tsquery('{text_query}') ORDER BY score DESC LIMIT 11;"""
             )
         results = cur.fetchall()
         keys = [row[0] for row in results]
