@@ -57,7 +57,7 @@ A demonstration application showcasing PostgreSQL's vector similarity search cap
    python setup_db.py
    ```
 
-2. **Set up pgvector embeddings** (⚠️ This takes ~10-15 minutes for 44K products)
+2. **Set up pgvector embeddings**
    ```bash
    python setup_pgvector.py
    ```
@@ -160,7 +160,7 @@ WITH (m = 16, ef_construction = 40);
 
 ## 📊 Dataset
 
-The application includes a large dataset of product images and metadata:
+The application includes a large dataset of product images and metadata from the following [Kaggle link](https://www.kaggle.com/datasets/paramaggarwal/fashion-product-images-small/download?datasetVersionNumber=1):
 - **44,093 products** from fashion/apparel domain
 - **Product images** hosted on AWS S3
 - **Rich metadata**: gender, category, color, season, usage type
